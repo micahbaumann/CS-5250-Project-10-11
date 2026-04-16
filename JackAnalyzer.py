@@ -6,6 +6,7 @@ from CompilationEngine import CompilationEngine
 
 def analyze_file(path: Path):
     tokenizer = JackTokenizer(path)
+    # print(tokenizer.tokens)
 
     output_path = path.with_suffix(".xml")
     with open(output_path, "w") as out:
