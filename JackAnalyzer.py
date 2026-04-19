@@ -4,28 +4,37 @@ from JackTokenizer import JackTokenizer
 from CompilationEngine import CompilationEngine
 
 
-def analyze_file(path: Path):
-    tokenizer = JackTokenizer(path)
-    # print(tokenizer.tokens)
+def write_xml(input_path):
+    tokenizer = JackTokenizer(input_path)
+    output_path = Path(input_path).with_suffix(".xml")
+    output_pathT = Path(input_path).with_name(Path(input_path).stem + "T.xml")
 
-    output_path = path.with_suffix(".xml")
-    with open(output_path, "w") as out:
+    with open(output_path, "w", encoding="utf-8") as out:
         engine = CompilationEngine(tokenizer, out)
-        # engine.compileClass()
+        engine.compileClass()
+
+    tokenizer = JackTokenizer(input_path)
+    with open(output_pathT, "w", encoding="utf-8") as out:
+        engine = CompilationEngine(tokenizer, out)
+        engine.compileTokens()
 
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: JackAnalyzer <file.jack | directory>")
+        print("Usage: python JackAnalyzer.py <input file or directory>")
         sys.exit(1)
 
-    input_path = Path(sys.argv[1])
+    path = Path(sys.argv[1])
 
-    if input_path.is_file():
-        analyze_file(input_path)
+    if path.is_file():
+        if path.suffix != ".jack":
+            raise ValueError("Input file must end with .jack")
+        write_xml(path)
+    elif path.is_dir():
+        for jack_file in sorted(path.glob("*.jack")):
+            write_xml(jack_file)
     else:
-        for file in input_path.glob("*.jack"):
-            analyze_file(file)
+        raise ValueError("Input path does not exist")
 
 
 if __name__ == "__main__":
