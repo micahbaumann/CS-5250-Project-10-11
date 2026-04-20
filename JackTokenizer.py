@@ -161,4 +161,6 @@ class JackTokenizer:
     def peek(self) -> str | None:
         if self.hasMoreTokens():
             return self.tokens[self.index + 1]
+        
+        return None
     

@@ -1,56 +1,17 @@
+from SymbolTable import SymbolTable
+from VMWriter import VMWriter
 
-OPS = {"+", "-", "*", "/", "&", "|", "<", ">", "="}
-UNARY_OPS = {"-", "~"}
+OPS = {"+": "add", "-": "sub", "&": "and", "|": "or", "<": "lt", ">": "gt", "=": "eq"}
+UNARY_OPS = {"-": "neg", "~": "not"}
 KEYWORD_CONSTANTS = {"true", "false", "null", "this"}
 
 class CompilationEngine:
     def __init__(self, tokenizer, output):
         self.tokenizer = tokenizer
-        self.out = output
-        self.indent = 0
-
-
-    def escape(self, value):
-        if value == "<":
-            return "&lt;"
-        if value == ">":
-            return "&gt;"
-        if value == "&":
-            return "&amp;"
-        return value
-    
-
-    def writeCurrentToken(self):
-        token_type = self.tokenizer.tokenType()
-        if token_type == "KEYWORD":
-            tag = "keyword"
-            value = self.tokenizer.keyWord()
-        elif token_type == "SYMBOL":
-            tag = "symbol"
-            value = self.tokenizer.symbol()
-        elif token_type == "IDENTIFIER":
-            tag = "identifier"
-            value = self.tokenizer.identifier()
-        elif token_type == "INT_CONST":
-            tag = "integerConstant"
-            value = str(self.tokenizer.intVal())
-        elif token_type == "STRING_CONST":
-            tag = "stringConstant"
-            value = self.tokenizer.stringVal()
-        else:
-            raise ValueError(f"Unknown token type: {token_type}")
-        
-        self.write(f"<{tag}> {self.escape(value)} </{tag}>")
-
-
-    def openTag(self, tag):
-        self.write(f"<{tag}>")
-        self.indent += 1
-
-
-    def closeTag(self, tag):
-        self.indent -= 1
-        self.write(f"</{tag}>")
+        self.vm = VMWriter(output)
+        self.symbols = SymbolTable()
+        self.class_name = ""
+        self.label_counter = 0
     
 
     def eat(self, expected=None):
@@ -62,18 +23,42 @@ class CompilationEngine:
         if expected is not None and self.tokenizer.current != expected:
             raise ValueError(f"Expected '{expected}', got '{self.tokenizer.current}'")
 
-        self.writeCurrentToken()
-    
+        return self.tokenizer.current
 
-    def write(self, text):
-        self.out.write("  " * self.indent + text + "\n")
+    
+    def newLabel(self, prefix: str) -> str:
+        label = f"{prefix}_{self.label_counter}"
+        self.label_counter += 1
+        return label
+
+
+    def segmentOf(self, kind: str) -> str:
+        if kind == "STATIC":
+            return "static"
+        if kind == "FIELD":
+            return "this"
+        if kind == "ARG":
+            return "argument"
+        if kind == "VAR":
+            return "local"
+        raise ValueError(f"Unknown kind: {kind}")
+
+
+    def pushVar(self, name: str) -> None:
+        kind = self.symbols.kindOf(name)
+        index = self.symbols.indexOf(name)
+        self.vm.writePush(self.segmentOf(kind), index)
+
+
+    def popVar(self, name: str) -> None:
+        kind = self.symbols.kindOf(name)
+        index = self.symbols.indexOf(name)
+        self.vm.writePop(self.segmentOf(kind), index)
 
 
     def compileClass(self) -> None:
-        self.openTag("class")
-
         self.eat("class")
-        self.eat()
+        self.class_name = self.eat()
         self.eat("{")
 
         while self.tokenizer.peek() in ("static", "field"):
@@ -83,204 +68,271 @@ class CompilationEngine:
             self.compileSubroutine()
 
         self.eat("}")
-        self.closeTag("class")
 
 
     def compileClassVarDec(self) -> None:
-        self.openTag("classVarDec")
+        kind = self.eat().upper()
+        type = self.eat()
+        name = self.eat()
 
-        self.eat()
-        self.eat()
-        self.eat()
+        self.symbols.define(name, type, kind)
 
         while self.tokenizer.peek() == ",":
             self.eat(",")
-            self.eat()
+            name = self.eat()
+            self.symbols.define(name, type, kind)
 
         self.eat(";")
-        self.closeTag("classVarDec")
 
 
     def compileSubroutine(self) -> None:
-        self.openTag("subroutineDec")
+        subroutine_kind = self.eat()
+        self.eat()
+        subroutine_name = self.eat()
 
-        self.eat()
-        self.eat()
-        self.eat()
+        self.symbols.startSubroutine()
+
+        if subroutine_kind == "method":
+            self.symbols.define("this", self.class_name, "ARG")
+
         self.eat("(")
         self.compileParameterList()
         self.eat(")")
 
-        self.openTag("subroutineBody")
         self.eat("{")
 
         while self.tokenizer.peek() == "var":
             self.compileVarDec()
 
-        self.compileStatements()
+        full_name = f"{self.class_name}.{subroutine_name}"
+        n_locals = self.symbols.varCount("VAR")
+        self.vm.writeFunction(full_name, n_locals)
 
+        if subroutine_kind == "constructor":
+            field_count = self.symbols.varCount("FIELD")
+            self.vm.writePush("constant", field_count)
+            self.vm.writeCall("Memory.alloc", 1)
+            self.vm.writePop("pointer", 0)
+
+        elif subroutine_kind == "method":
+            self.vm.writePush("argument", 0)
+            self.vm.writePop("pointer", 0)
+
+        self.compileStatements()
         self.eat("}")
-        self.closeTag("subroutineBody")
-        self.closeTag("subroutineDec")
 
 
     def compileParameterList(self) -> None:
-        self.openTag("parameterList")
-
         if self.tokenizer.peek() != ")":
-            self.eat()
-            self.eat()
+            type = self.eat()
+            name = self.eat()
+            self.symbols.define(name, type, "ARG")
 
             while self.tokenizer.peek() == ",":
                 self.eat(",")
-                self.eat()
-                self.eat()
-
-        self.closeTag("parameterList")
+                type = self.eat()
+                name = self.eat()
+                self.symbols.define(name, type, "ARG")
 
 
     def compileVarDec(self) -> None:
-        self.openTag("varDec")
-
         self.eat("var")
-        self.eat()
-        self.eat()
+        type = self.eat()
+        name = self.eat()
+        self.symbols.define(name, type, "VAR")
 
         while self.tokenizer.peek() == ",":
             self.eat(",")
-            self.eat()
+            name = self.eat()
+            self.symbols.define(name, type, "VAR")
 
         self.eat(";")
-        self.closeTag("varDec")
 
 
     def compileStatements(self) -> None:
-        self.openTag("statements")
-
         while self.tokenizer.peek() in ("let", "if", "while", "do", "return"):
-            nxt = self.tokenizer.peek()
-            if nxt == "let":
+            next = self.tokenizer.peek()
+            if next == "let":
                 self.compileLet()
-            elif nxt == "if":
+            elif next == "if":
                 self.compileIf()
-            elif nxt == "while":
+            elif next == "while":
                 self.compileWhile()
-            elif nxt == "do":
+            elif next == "do":
                 self.compileDo()
-            elif nxt == "return":
+            elif next == "return":
                 self.compileReturn()
-
-        self.closeTag("statements")
 
 
     def compileDo(self) -> None:
-        self.openTag("doStatement")
-
         self.eat("do")
-        self.eat()
+        name = self.eat()
+        n_args = 0
 
         if self.tokenizer.peek() == ".":
             self.eat(".")
-            self.eat()
+            subroutine_name = self.eat()
+
+            kind = self.symbols.kindOf(name)
+            if kind is not None:
+                type_ = self.symbols.typeOf(name)
+                index = self.symbols.indexOf(name)
+                self.vm.writePush(self.segmentOf(kind), index)
+                full_name = f"{type_}.{subroutine_name}"
+                n_args += 1
+            else:
+                full_name = f"{name}.{subroutine_name}"
+
+        else:
+            self.vm.writePush("pointer", 0)
+            full_name = f"{self.class_name}.{name}"
+            n_args += 1
 
         self.eat("(")
-        self.compileExpressionList()
+        n_args += self.compileExpressionList()
         self.eat(")")
-        self.eat(";")
 
-        self.closeTag("doStatement")
+        self.vm.writeCall(full_name, n_args)
+        self.vm.writePop("temp", 0)
+        self.eat(";")
 
 
     def compileLet(self) -> None:
-        self.openTag("letStatement")
-
         self.eat("let")
-        self.eat()
+        name = self.eat()
 
+        is_array = False
         if self.tokenizer.peek() == "[":
+            is_array = True
             self.eat("[")
+            self.pushVar(name)
             self.compileExpression()
+            self.vm.writeArithmetic("add")
             self.eat("]")
 
         self.eat("=")
         self.compileExpression()
         self.eat(";")
 
-        self.closeTag("letStatement")
+        if is_array:
+            self.vm.writePop("temp", 0)
+            self.vm.writePop("pointer", 1)
+            self.vm.writePush("temp", 0)
+            self.vm.writePop("that", 0)
+        else:
+            self.popVar(name)
 
 
     def compileWhile(self) -> None:
-        self.openTag("whileStatement")
-
         self.eat("while")
+
+        start_label = self.newLabel("WHILE_EXP")
+        end_label = self.newLabel("WHILE_END")
+
+        self.vm.writeLabel(start_label)
+
         self.eat("(")
         self.compileExpression()
         self.eat(")")
+
+        self.vm.writeArithmetic("not")
+        self.vm.writeIf(end_label)
+
         self.eat("{")
         self.compileStatements()
         self.eat("}")
 
-        self.closeTag("whileStatement")
+        self.vm.writeGoto(start_label)
+        self.vm.writeLabel(end_label)
 
 
     def compileReturn(self) -> None:
-        self.openTag("returnStatement")
-
         self.eat("return")
 
         if self.tokenizer.peek() != ";":
             self.compileExpression()
+        else:
+            self.vm.writePush("constant", 0)
 
         self.eat(";")
-        self.closeTag("returnStatement")
+        self.vm.writeReturn()
 
 
     def compileIf(self) -> None:
-        self.openTag("ifStatement")
-
         self.eat("if")
+
+        true_label = self.newLabel("IF_TRUE")
+        false_label = self.newLabel("IF_FALSE")
+        end_label = self.newLabel("IF_END")
+
         self.eat("(")
         self.compileExpression()
         self.eat(")")
+
+        self.vm.writeIf(true_label)
+        self.vm.writeGoto(false_label)
+        self.vm.writeLabel(true_label)
+
         self.eat("{")
         self.compileStatements()
         self.eat("}")
 
         if self.tokenizer.peek() == "else":
+            self.vm.writeGoto(end_label)
+            self.vm.writeLabel(false_label)
+
             self.eat("else")
             self.eat("{")
             self.compileStatements()
             self.eat("}")
 
-        self.closeTag("ifStatement")
+            self.vm.writeLabel(end_label)
+        else:
+            self.vm.writeLabel(false_label)
 
 
     def compileExpression(self) -> None:
-        self.openTag("expression")
-
         self.compileTerm()
 
-        while self.tokenizer.peek() in OPS:
-            self.eat()
+        while self.tokenizer.peek() in OPS or self.tokenizer.peek() in ("*", "/"):
+            op = self.eat()
             self.compileTerm()
 
-        self.closeTag("expression")
+            if op in OPS:
+                self.vm.writeArithmetic(OPS[op])
+            elif op == "*":
+                self.vm.writeCall("Math.multiply", 2)
+            elif op == "/":
+                self.vm.writeCall("Math.divide", 2)
 
 
     def compileTerm(self) -> None:
-        self.openTag("term")
-
         next_token = self.tokenizer.peek()
 
         if next_token is None:
             raise ValueError("Unexpected end of input in term")
 
         if next_token.isdigit():
-            self.eat()
+            value = int(self.eat())
+            self.vm.writePush("constant", value)
+
         elif next_token.startswith('"'):
-            self.eat()
+            value = self.eat()[1:-1]
+            self.vm.writePush("constant", len(value))
+            self.vm.writeCall("String.new", 1)
+            for ch in value:
+                self.vm.writePush("constant", ord(ch))
+                self.vm.writeCall("String.appendChar", 2)
+
         elif next_token in KEYWORD_CONSTANTS:
-            self.eat()
+            kw = self.eat()
+            if kw in ("false", "null"):
+                self.vm.writePush("constant", 0)
+            elif kw == "true":
+                self.vm.writePush("constant", 0)
+                self.vm.writeArithmetic("not")
+            elif kw == "this":
+                self.vm.writePush("pointer", 0)
 
         elif next_token == "(":
             self.eat("(")
@@ -288,66 +340,64 @@ class CompilationEngine:
             self.eat(")")
 
         elif next_token in UNARY_OPS:
-            self.eat()
+            op = self.eat()
             self.compileTerm()
+            self.vm.writeArithmetic(UNARY_OPS[op])
 
         else:
-            self.eat()
+            name = self.eat()
 
             if self.tokenizer.peek() == "[":
                 self.eat("[")
+                self.pushVar(name)
                 self.compileExpression()
+                self.vm.writeArithmetic("add")
                 self.eat("]")
-            elif self.tokenizer.peek() == "(":
+                self.vm.writePop("pointer", 1)
+                self.vm.writePush("that", 0)
+
+            elif self.tokenizer.peek() == "(" or self.tokenizer.peek() == ".":
+                n_args = 0
+
+                if self.tokenizer.peek() == ".":
+                    self.eat(".")
+                    subroutine_name = self.eat()
+
+                    kind = self.symbols.kindOf(name)
+                    if kind is not None:
+                        type_ = self.symbols.typeOf(name)
+                        index = self.symbols.indexOf(name)
+                        self.vm.writePush(self.segmentOf(kind), index)
+                        full_name = f"{type_}.{subroutine_name}"
+                        n_args += 1
+                    else:
+                        full_name = f"{name}.{subroutine_name}"
+
+                else:
+                    self.vm.writePush("pointer", 0)
+                    full_name = f"{self.class_name}.{name}"
+                    n_args += 1
+
                 self.eat("(")
-                self.compileExpressionList()
-                self.eat(")")
-            elif self.tokenizer.peek() == ".":
-                self.eat(".")
-                self.eat()
-                self.eat("(")
-                self.compileExpressionList()
+                n_args += self.compileExpressionList()
                 self.eat(")")
 
-        self.closeTag("term")
+                self.vm.writeCall(full_name, n_args)
+
+            else:
+                self.pushVar(name)
 
 
     def compileExpressionList(self) -> None:
-        self.openTag("expressionList")
+        count = 0
 
         if self.tokenizer.peek() != ")":
             self.compileExpression()
+            count += 1
+
             while self.tokenizer.peek() == ",":
                 self.eat(",")
                 self.compileExpression()
+                count += 1
 
-        self.closeTag("expressionList")
-    
-
-    def compileTokens(self) -> None:
-        self.write("<tokens>")
-        while self.tokenizer.hasMoreTokens():
-            self.tokenizer.advance()
-            token_type = self.tokenizer.tokenType()
-
-            if token_type == "KEYWORD":
-                tag = "keyword"
-                value = self.tokenizer.keyWord()
-            elif token_type == "SYMBOL":
-                tag = "symbol"
-                value = self.tokenizer.symbol()
-            elif token_type == "IDENTIFIER":
-                tag = "identifier"
-                value = self.tokenizer.identifier()
-            elif token_type == "INT_CONST":
-                tag = "integerConstant"
-                value = str(self.tokenizer.intVal())
-            elif token_type == "STRING_CONST":
-                tag = "stringConstant"
-                value = self.tokenizer.stringVal()
-            else:
-                raise ValueError(f"Unknown token type: {token_type}")
-
-            self.write(f"<{tag}> {self.escape(value)} </{tag}>")
-
-        self.write("</tokens>")
+        return count
